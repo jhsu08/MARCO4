@@ -361,7 +361,7 @@ class MCU:
                     # Compute branch-specific mass (weighted by candidate belief)
                     branch_mass = grid_state.overall_mass * belief
 
-                    heuristic = self._compute_heuristic(branch_grid)
+                    heuristic = self._compute_heuristic(branch_grid, grid_state)
                     self.css.add_branch(
                         grid=branch_grid,
                         combined_mass=branch_mass,
@@ -373,7 +373,7 @@ class MCU:
                     )
             else:
                 # No uncertain cells - add single branch with partial grid
-                heuristic = self._compute_heuristic(partial_grid)
+                heuristic = self._compute_heuristic(partial_grid, grid_state)
                 self.css.add_branch(
                     grid=partial_grid,
                     combined_mass=grid_state.overall_mass,
@@ -563,11 +563,83 @@ class MCU:
 
         return grid_state
 
-    def _compute_heuristic(self, partial_grid: Grid) -> float:
-        """Simple heuristic: fraction of empty cells."""
-        empty = count_empty_cells(partial_grid)
-        total = partial_grid.size
-        return empty / total if total > 0 else 0.0
+    def _compute_heuristic(
+        self,
+        partial_grid: Grid,
+        grid_state: Optional[GridState] = None
+    ) -> float:
+        """
+        Compute A* heuristic based on D-S mass uncertainty.
+
+        The heuristic combines:
+        1. Fraction of unfilled cells (basic progress measure)
+        2. Average uncertainty of unfilled cells based on D-S masses
+
+        For each unfilled cell, uncertainty is measured as:
+        - 1 - max_pignistic_prob: high when no color dominates
+
+        Returns value in [0, 1] where 0 = complete solution, 1 = maximum uncertainty.
+        """
+        h, w = partial_grid.shape
+        total_cells = h * w
+
+        if total_cells == 0:
+            return 0.0
+
+        # Count empty cells
+        empty_cells = count_empty_cells(partial_grid)
+
+        # If grid is complete, heuristic is 0
+        if empty_cells == 0:
+            return 0.0
+
+        # Basic heuristic: fraction of empty cells
+        empty_fraction = empty_cells / total_cells
+
+        # If no grid_state provided, use simple heuristic
+        if grid_state is None:
+            return empty_fraction
+
+        # Compute uncertainty-based heuristic using D-S masses
+        total_uncertainty = 0.0
+        unfilled_count = 0
+
+        for (i, j), cell_state in grid_state.cell_states.items():
+            # Skip fixed cells
+            if cell_state.is_fixed():
+                continue
+
+            # Skip cells already filled in partial grid
+            if partial_grid[i, j] >= 0:
+                continue
+
+            unfilled_count += 1
+
+            # Get pignistic probability distribution for colors 0-9
+            pignistic = get_pignistic_distribution(cell_state.mass_function)
+
+            if pignistic:
+                # Max probability for any color
+                max_prob = max(pignistic.values())
+                # Uncertainty = 1 - max_prob (high when distribution is uniform)
+                cell_uncertainty = 1.0 - max_prob
+            else:
+                # Complete uncertainty
+                cell_uncertainty = 1.0
+
+            total_uncertainty += cell_uncertainty
+
+        # Average uncertainty per unfilled cell
+        if unfilled_count > 0:
+            avg_uncertainty = total_uncertainty / unfilled_count
+        else:
+            avg_uncertainty = 0.0
+
+        # Combine empty fraction and uncertainty
+        # Weight: 50% progress (empty cells), 50% uncertainty
+        heuristic = 0.5 * empty_fraction + 0.5 * avg_uncertainty * empty_fraction
+
+        return heuristic
 
     def _infer_target_size(self, problem: Any) -> Tuple[int, int]:
         """Infer target size from training examples."""
